@@ -10,6 +10,7 @@ from __future__ import print_function
 
 import tensorflow as tf
 from tensorflow.keras import layers
+from scipy.ndimage import map_coordinates, gaussian_filter #used for elastic deformation
 
 import argparse
 import numpy as np
@@ -23,12 +24,10 @@ from wandb.keras import WandbCallback
 MODEL_NAME = ""
 DATA_HOME = "./dataset" 
 BATCH_SIZE = 128
-EPOCHS = 10
-L1_SIZE = 32
-L2_SIZE = 64
+EPOCHS = 100
+FILTERS = 32
 DROPOUT_1_RATE = 0.25
 DROPOUT_2_RATE = 0.5
-FC1_SIZE = 128
 NUM_CLASSES = 10
 #NUM_CLASSES_K49 = 49
 
@@ -42,17 +41,15 @@ LABELS_49 = ["あ","い","う","え","お","か","き","く","け","こ","さ","
 
 def train_cnn(args):
   # initialize wandb logging to your project
-  wandb.init()
+  wandb.init(entity="tom", project="kmnist")
   config = {
     "model_type" : "cnn",
     "batch_size" : args.batch_size,
     "num_classes" : args.num_classes,
     "epochs" : args.epochs,
-    "l1_size": args.l1_size,
-    "l2_size" : args.l2_size,
+    "filters": args.filters,
     "dropout_1" : args.dropout_1,
     "dropout_2" : args.dropout_2,
-    "fc1_size" : args.fc1_size
   }
   wandb.config.update(config)
 
@@ -85,30 +82,140 @@ def train_cnn(args):
   # Convert class vectors to binary class matrices
   y_train = tf.keras.utils.to_categorical(y_train, NUM_CLASSES)
   y_test = tf.keras.utils.to_categorical(y_test, NUM_CLASSES)
+  
+  def conv2d(filters, kernel_size=(3, 3), **kwargs):
+    return layers.Conv2D(filters, kernel_size=kernel_size, kernel_initializer='lecun_normal', padding='same', use_bias=False, **kwargs)
+  
+  def dense(filters, **kwargs):
+    return layers.Dense(filters, kernel_initializer='lecun_normal', use_bias=False, **kwargs)
+  
+  def act(x):
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
+    return x
+  
+  def block(x_init, filters, down=False):
+    strides = 2 if down else 1
+    
+    a = conv2d(filters, kernel_size=1, strides=strides)(x_init)
+    a = act(a)
+    
+    b = layers.AveragePooling2D(pool_size=3, strides=strides, padding='same')(x_init)
+    b = conv2d(filters, kernel_size=1)(b)
+    b = act(b)
+    
+    c = conv2d(filters, kernel_size=(1, 3))(x_init)
+    c = conv2d(filters, kernel_size=(3, 1), strides=strides)(c)
+    c = act(c)
+    
+    d = conv2d(filters, kernel_size=(1, 5))(x_init)
+    d = conv2d(filters, kernel_size=(5, 1), strides=strides)(d)
+    d = act(d)
+    
+    return layers.Concatenate()([a, b, c, d])
+  
+  def stack(x_init, filters, count):
+    x = x_init
+    
+    blocks = []
+    for i in range(count):
+      x = block(x, filters, down=(i==0))
+      blocks.push(x)
+    
+    return blocks[-1]
+#     return Add()(blocks)
 
   # Build model
-  model = tf.keras.Sequential()
-  model.add(layers.Conv2D(args.l1_size, kernel_size=(3, 3),
-                 activation='relu',
-                 input_shape=input_shape))
-  model.add(layers.Conv2D(args.l2_size, (3, 3), activation='relu'))
-  model.add(layers.MaxPooling2D(pool_size=(2, 2)))
-  model.add(layers.Dropout(args.dropout_1))
-  model.add(layers.Flatten())
-  model.add(layers.Dense(args.fc1_size, activation='relu'))
-  model.add(layers.Dropout(args.dropout_2))
-  model.add(layers.Dense(args.num_classes, activation='softmax'))
-
+  input = layers.Input(input_shape)
+  
+  x = layers.GaussianNoise(0.1)(input)
+  
+  x = conv2d(args.filters, kernel_size=(7, 7))(x)
+  x = act(x)
+  
+  x = stack(x, args.filters*2, 3)
+  
+  x = layers.SpatialDropout2D(args.dropout_1)(x)
+  x = layers.GaussianNoise(0.1)(x)
+  
+  x = stack(x, args.filters*4, 2)
+  
+  x = layers.SpatialDropout2D(args.dropout_1)(x)
+  x = layers.GaussianNoise(0.1)(x)
+  
+  x = stack(x, args.filters*8, 2)
+  
+  x = layers.SpatialDropout2D(args.dropout_2)(x)
+  x = layers.GaussianNoise(0.1)(x)
+  
+  x = layers.GlobalAveragePooling2D()(x)
+  x = dense(args.num_classes)(x)
+  output = layers.Activation('softmax')(x)
+  
+  model = tf.keras.Model(input, output)
   model.compile(loss="categorical_crossentropy",
-              optimizer="adadelta",
+              optimizer="adam",
               metrics=['accuracy'])
+  
+  def lr_schedule(epoch):
+    lr = 1e-3
+    final_lr = 1e-5
+    base = np.power(final_lr / lr, 1. / args.epochs)
+    return lr * base**epoch
+  
+  # adapted from https://github.com/fcalvet/image_tools/blob/master/image_augmentation.py#L62
+  def deform_grid(X, sigma_range=3, points=3):
+    sigma = np.random.uniform(0, sigma_range)
+    
+    orig_shape = X.shape
+    shape = (orig_shape[0], orig_shape[1])
+    X = X.reshape(shape)
 
-  model.fit(x_train, y_train,
-            batch_size=args.batch_size,
+    coordinates = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
+    xi=np.meshgrid(np.linspace(0,points-1,shape[0]), np.linspace(0,points-1,shape[1]), indexing='ij')
+    grid = [points, points]
+
+    for i in range(2):
+      yi=np.random.randn(*grid)*sigma
+      y = map_coordinates(yi, xi, order=3).reshape(shape)
+      coordinates[i]=np.add(coordinates[i],y) #adding the displacement
+
+    return map_coordinates(X, coordinates, order=3).reshape(orig_shape)
+  
+  def deform_pixel(X, alpha_range=15, sigma=5):
+    alpha = np.random.uniform(0, alpha_range)
+    
+    orig_shape = X.shape
+    shape = (orig_shape[0], orig_shape[1])
+    X = X.reshape(shape)
+    
+    dx = gaussian_filter(np.random.randn(*shape), sigma, mode="constant", cval=0) * alpha
+    dy = gaussian_filter(np.random.randn(*shape), sigma, mode="constant", cval=0) * alpha
+    x, y = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
+    indices = x+dx, y+dy
+
+    return map_coordinates(X, indices, order=3).reshape(orig_shape)
+  
+  datagen = tf.keras.preprocessing.image.ImageDataGenerator(
+    rotation_range=30,
+    shear_range=30,
+    width_shift_range=0.3,
+    height_shift_range=0.3,
+    preprocessing_function=deform_pixel,
+  )
+
+  model.fit_generator(
+            datagen.flow(x_train, y_train, batch_size=args.batch_size),
             epochs=args.epochs,
+            steps_per_epoch=len(x_train)//args.batch_size,
             verbose=1,
+            use_multiprocessing=True,
             validation_data=(x_test, y_test),
-            callbacks=[KmnistCallback(), WandbCallback(data_type="image", labels=LABELS_10)])
+            callbacks=[
+              KmnistCallback(),
+              WandbCallback(data_type="image", labels=LABELS_10),
+              tf.keras.callbacks.LearningRateScheduler(lr_schedule)
+            ])
 
   train_score = model.evaluate(x_train, y_train, verbose=0)
   test_score = model.evaluate(x_test, y_test, verbose=0)
@@ -153,20 +260,10 @@ if __name__ == "__main__":
     default=EPOCHS,
     help="number of training epochs (passes through full training data)")
   parser.add_argument(
-    "--fc1_size",
+    "--filters",
     type=int,
-    default=FC1_SIZE,
-    help="size of fully-connected layer")
-  parser.add_argument(
-    "--l1_size",
-    type=int,
-    default=L1_SIZE,
-    help="size of first conv layer")
-  parser.add_argument(
-    "--l2_size",
-    type=int,
-    default=L2_SIZE,
-    help="size of second conv layer")
+    default=FILTERS,
+    help="base number of filters")
   parser.add_argument(
     "--num_classes",
     type=int,
