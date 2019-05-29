@@ -117,18 +117,16 @@ def train_cnn(args):
   def stack(x_init, filters, count):
     x = x_init
     
-    blocks = []
     for i in range(count):
       x = block(x, filters, down=(i==0))
-      blocks.push(x)
     
-    return blocks[-1]
-#     return Add()(blocks)
+    return x
 
   # Build model
   input = layers.Input(input_shape)
+  x = input
   
-  x = layers.GaussianNoise(0.1)(input)
+  x = layers.GaussianNoise(0.1)(x)
   
   x = conv2d(args.filters, kernel_size=(7, 7))(x)
   x = act(x)
@@ -163,45 +161,11 @@ def train_cnn(args):
     base = np.power(final_lr / lr, 1. / args.epochs)
     return lr * base**epoch
   
-  # adapted from https://github.com/fcalvet/image_tools/blob/master/image_augmentation.py#L62
-  def deform_grid(X, sigma_range=3, points=3):
-    sigma = np.random.uniform(0, sigma_range)
-    
-    orig_shape = X.shape
-    shape = (orig_shape[0], orig_shape[1])
-    X = X.reshape(shape)
-
-    coordinates = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
-    xi=np.meshgrid(np.linspace(0,points-1,shape[0]), np.linspace(0,points-1,shape[1]), indexing='ij')
-    grid = [points, points]
-
-    for i in range(2):
-      yi=np.random.randn(*grid)*sigma
-      y = map_coordinates(yi, xi, order=3).reshape(shape)
-      coordinates[i]=np.add(coordinates[i],y) #adding the displacement
-
-    return map_coordinates(X, coordinates, order=3).reshape(orig_shape)
-  
-  def deform_pixel(X, alpha_range=15, sigma=5):
-    alpha = np.random.uniform(0, alpha_range)
-    
-    orig_shape = X.shape
-    shape = (orig_shape[0], orig_shape[1])
-    X = X.reshape(shape)
-    
-    dx = gaussian_filter(np.random.randn(*shape), sigma, mode="constant", cval=0) * alpha
-    dy = gaussian_filter(np.random.randn(*shape), sigma, mode="constant", cval=0) * alpha
-    x, y = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
-    indices = x+dx, y+dy
-
-    return map_coordinates(X, indices, order=3).reshape(orig_shape)
-  
   datagen = tf.keras.preprocessing.image.ImageDataGenerator(
     rotation_range=30,
     shear_range=30,
     width_shift_range=0.3,
     height_shift_range=0.3,
-    preprocessing_function=deform_pixel,
   )
 
   model.fit_generator(
