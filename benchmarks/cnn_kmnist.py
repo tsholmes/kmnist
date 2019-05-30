@@ -24,7 +24,7 @@ from wandb.keras import WandbCallback
 MODEL_NAME = ""
 DATA_HOME = "./dataset" 
 BATCH_SIZE = 128
-EPOCHS = 100
+EPOCHS = 1000
 FILTERS = 32
 DROPOUT_1_RATE = 0.25
 DROPOUT_2_RATE = 0.5
@@ -94,59 +94,58 @@ def train_cnn(args):
     x = layers.Activation('relu')(x)
     return x
   
-  def block(x_init, filters, down=False):
-    strides = 2 if down else 1
+  def block(x_init, filters):
+    x = x_init
+    xs = [x]
     
-    a = conv2d(filters, kernel_size=1, strides=strides)(x_init)
-    a = act(a)
+    for i in range(4):
+      if len(xs) > 1:
+        x = layers.Concatenate()(xs)
+      x = conv2d(filters, kernel_size=(3, 3))(x)
+      x = act(x)
+      xs = xs + [x]
     
-    b = layers.AveragePooling2D(pool_size=3, strides=strides, padding='same')(x_init)
-    b = conv2d(filters, kernel_size=1)(b)
-    b = act(b)
-    
-    c = conv2d(filters, kernel_size=(1, 3))(x_init)
-    c = conv2d(filters, kernel_size=(3, 1), strides=strides)(c)
-    c = act(c)
-    
-    d = conv2d(filters, kernel_size=(1, 5))(x_init)
-    d = conv2d(filters, kernel_size=(5, 1), strides=strides)(d)
-    d = act(d)
-    
-    return layers.Concatenate()([a, b, c, d])
+    return x
   
-  def stack(x_init, filters, count):
+  def stack(x_init, filters, count, down=True):
     x = x_init
     
     for i in range(count):
-      x = block(x, filters, down=(i==0))
+      x = block(x, filters)
+    
+    if down:
+      x = layers.AveragePooling2D(pool_size=2, padding='same')(x)
     
     return x
 
   # Build model
   input = layers.Input(input_shape)
+  
   x = input
   
   x = layers.GaussianNoise(0.1)(x)
-  
-  x = conv2d(args.filters, kernel_size=(7, 7))(x)
-  x = act(x)
-  
-  x = stack(x, args.filters*2, 3)
-  
+
+  x = stack(x, args.filters, 2)
+
   x = layers.SpatialDropout2D(args.dropout_1)(x)
   x = layers.GaussianNoise(0.1)(x)
-  
+
+  x = stack(x, args.filters*2, 2)
+
+  x = layers.SpatialDropout2D(args.dropout_1)(x)
+  x = layers.GaussianNoise(0.1)(x)
+
   x = stack(x, args.filters*4, 2)
-  
-  x = layers.SpatialDropout2D(args.dropout_1)(x)
-  x = layers.GaussianNoise(0.1)(x)
-  
-  x = stack(x, args.filters*8, 2)
-  
+
   x = layers.SpatialDropout2D(args.dropout_2)(x)
   x = layers.GaussianNoise(0.1)(x)
-  
-  x = layers.GlobalAveragePooling2D()(x)
+
+  x = stack(x, args.filters*8, 2)
+
+  x = layers.SpatialDropout2D(args.dropout_2)(x)
+  x = layers.GaussianNoise(0.1)(x)
+
+  x = layers.Flatten()(x)
   x = dense(args.num_classes)(x)
   output = layers.Activation('softmax')(x)
   
@@ -178,7 +177,9 @@ def train_cnn(args):
             callbacks=[
               KmnistCallback(),
               WandbCallback(data_type="image", labels=LABELS_10),
-              tf.keras.callbacks.LearningRateScheduler(lr_schedule)
+#               tf.keras.callbacks.LearningRateScheduler(lr_schedule)
+              tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', mode='min', factor=np.sqrt(0.1), patience=10, min_lr=1e-7, min_delta=1e-5),
+              tf.keras.callbacks.EarlyStopping(monitor='val_loss', mode='min', patience=40, min_delta=1e-5),
             ])
 
   train_score = model.evaluate(x_train, y_train, verbose=0)

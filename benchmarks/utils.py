@@ -2,6 +2,7 @@
 import numpy as np
 import os
 
+import tensorflow as tf
 from tensorflow.keras.callbacks import Callback
 import wandb
 
@@ -16,6 +17,9 @@ class KmnistCallback(Callback):
         wandb.log({"kmnist_val_acc" : logs["val_acc"]}, commit=False)
     else:
         raise Exception("Keras logs object missing validation accuracy")
+    
+    lr = tf.keras.backend.eval(self.model.optimizer.lr)
+    wandb.log({"lr": lr}, commit=False)
 
 # load data file into array
 def load(f):
