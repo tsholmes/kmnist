@@ -24,10 +24,10 @@ from wandb.keras import WandbCallback
 MODEL_NAME = ""
 DATA_HOME = "./dataset" 
 BATCH_SIZE = 128
-EPOCHS = 100
-FILTERS = 32
-DROPOUT_1_RATE = 0.25
-DROPOUT_2_RATE = 0.5
+EPOCHS = 1000
+FILTERS = 16
+GROWTH_RATE = 12
+DROPOUT_RATE = 0.2
 NUM_CLASSES = 10
 #NUM_CLASSES_K49 = 49
 
@@ -48,8 +48,8 @@ def train_cnn(args):
     "num_classes" : args.num_classes,
     "epochs" : args.epochs,
     "filters": args.filters,
-    "dropout_1" : args.dropout_1,
-    "dropout_2" : args.dropout_2,
+    "growth_rate": args.growth_rate,
+    "dropout" : args.dropout,
   }
   wandb.config.update(config)
 
@@ -94,59 +94,47 @@ def train_cnn(args):
     x = layers.Activation('relu')(x)
     return x
   
-  def block(x_init, filters, down=False):
-    strides = 2 if down else 1
-    
-    a = conv2d(filters, kernel_size=1, strides=strides)(x_init)
-    a = act(a)
-    
-    b = layers.AveragePooling2D(pool_size=3, strides=strides, padding='same')(x_init)
-    b = conv2d(filters, kernel_size=1)(b)
-    b = act(b)
-    
-    c = conv2d(filters, kernel_size=(1, 3))(x_init)
-    c = conv2d(filters, kernel_size=(3, 1), strides=strides)(c)
-    c = act(c)
-    
-    d = conv2d(filters, kernel_size=(1, 5))(x_init)
-    d = conv2d(filters, kernel_size=(5, 1), strides=strides)(d)
-    d = act(d)
-    
-    return layers.Concatenate()([a, b, c, d])
+  def chunk(x, growth_rate):
+    x = act(x)
+    x = conv2d(4*growth_rate, kernel_size=(1, 1))(x)
+    x = act(x)
+    x = conv2d(growth_rate, kernel_size=(3, 3))(x)
+    x = layers.SpatialDropout2D(args.dropout)(x)
+    return x
   
-  def stack(x_init, filters, count):
-    x = x_init
-    
-    for i in range(count):
-      x = block(x, filters, down=(i==0))
-    
+  def block(x, num_filters, growth_rate, chunks):
+    for i in range(chunks):
+      y = chunk(x, growth_rate)
+      x = layers.Concatenate()([x, y])
+      num_filters += growth_rate
+    return x, num_filters
+  
+  def transition(x, num_filters):
+    x = act(x)
+    x = conv2d(num_filters, kernel_size=(1, 1))(x)
+    x = layers.AveragePooling2D(pool_size=(2, 2), padding='same')(x)
+    x = layers.SpatialDropout2D(args.dropout)(x)
     return x
 
   # Build model
   input = layers.Input(input_shape)
   x = input
   
-  x = layers.GaussianNoise(0.1)(x)
+  num_filters = args.filters
   
-  x = conv2d(args.filters, kernel_size=(7, 7))(x)
-  x = act(x)
+  x = conv2d(num_filters, kernel_size=(7, 7), strides=2)
   
-  x = stack(x, args.filters*2, 3)
+  x, num_filters = block(x, num_filters, args.growth_rate, 6)
   
-  x = layers.SpatialDropout2D(args.dropout_1)(x)
-  x = layers.GaussianNoise(0.1)(x)
+  x = transition(x, num_filters)
   
-  x = stack(x, args.filters*4, 2)
+  x, num_filters = block(x, num_filters, args.growth_rate, 12)
   
-  x = layers.SpatialDropout2D(args.dropout_1)(x)
-  x = layers.GaussianNoise(0.1)(x)
+  x = transition(x, num_filters)
   
-  x = stack(x, args.filters*8, 2)
+  x, num_filters = block(x, num_filters, args.growth_rate, 24)
   
-  x = layers.SpatialDropout2D(args.dropout_2)(x)
-  x = layers.GaussianNoise(0.1)(x)
-  
-  x = layers.GlobalAveragePooling2D()(x)
+  x = layers.GlobalAveratePooling2D()(x)
   x = dense(args.num_classes)(x)
   output = layers.Activation('softmax')(x)
   
@@ -178,7 +166,9 @@ def train_cnn(args):
             callbacks=[
               KmnistCallback(),
               WandbCallback(data_type="image", labels=LABELS_10),
-              tf.keras.callbacks.LearningRateScheduler(lr_schedule)
+#               tf.keras.callbacks.LearningRateScheduler(lr_schedule)
+              tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', mode='min', factor=np.sqrt(0.1), patience=10, min_lr=1e-7, min_delta=1e-5),
+              tf.keras.callbacks.EarlyStopping(monitor='val_loss', mode='min', patience=40, min_delta=1e-5),
             ])
 
   train_score = model.evaluate(x_train, y_train, verbose=0)
@@ -208,15 +198,10 @@ if __name__ == "__main__":
     default=BATCH_SIZE,
     help="batch size")
   parser.add_argument(
-    "--dropout_1",
+    "--dropout",
     type=float,
-    default=DROPOUT_1_RATE,
-    help="dropout rate for first dropout layer")
-  parser.add_argument(
-    "--dropout_2",
-    type=float,
-    default=DROPOUT_2_RATE,
-    help="dropout rate for second dropout layer")
+    default=DROPOUT_RATE,
+    help="dropout rate")
   parser.add_argument(
     "-e",
     "--epochs",
@@ -228,6 +213,11 @@ if __name__ == "__main__":
     type=int,
     default=FILTERS,
     help="base number of filters")
+  parser.add_argument(
+    "--growth_rate",
+    type=int,
+    default=GROWTH_RATE,
+    help="growth rate of filters per layer")
   parser.add_argument(
     "--num_classes",
     type=int,
